@@ -1,20 +1,20 @@
 import os
 import json
+import re
 from datetime import datetime
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 class TKTrackerPlugin(Star):
-    # 核心变动：这里增加了 config: dict = None，这是 AstrBot 官方注入动态配置的标准做法
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         
-        self.data_dir = os.path.join(os.getcwd(), "data", "tk_tracker")
+        self.plugin_dir = os.path.dirname(__file__)
+        self.data_dir = os.path.join(self.plugin_dir, "data", "tk_tracker")
         self.data_file = os.path.join(self.data_dir, "records.json")
         self.records = self.load_data()
         
-        # 接收 WebUI 传过来的配置，如果没有则使用空字典兜底
         self.plugin_config = config or {}
 
     def load_data(self) -> dict:
@@ -22,13 +22,23 @@ class TKTrackerPlugin(Star):
             try:
                 with open(self.data_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    
+                    # 修复6：加强数据结构校验，防止历史坏数据或被手动乱改导致 KeyError
+                    validated_data = {}
                     for player_id, records in data.items():
-                        if isinstance(records, int):
-                            data[player_id] = [{"time": "未知时间", "reason": "未知原因"} for _ in range(records)]
-                    return data
+                        if isinstance(records, int): # 兼容远古版本
+                            validated_data[player_id] = [{"time": "未知时间", "reason": "未知原因"} for _ in range(records)]
+                        elif isinstance(records, list): # 正常情况检查内部字段
+                            valid_records = []
+                            for r in records:
+                                if isinstance(r, dict) and "time" in r and "reason" in r:
+                                    valid_records.append(r)
+                            validated_data[player_id] = valid_records
+                    return validated_data
+            except json.JSONDecodeError as e:
+                logger.error(f"读取违规记录失败(JSON格式错误): {e}")
             except Exception as e:
-                logger.error(f"读取违规记录失败: {e}")
-                return {}
+                logger.error(f"读取违规记录失败(未知错误): {e}", exc_info=True)
         return {}
 
     def save_data(self):
@@ -38,72 +48,72 @@ class TKTrackerPlugin(Star):
             with open(self.data_file, "w", encoding="utf-8") as f:
                 json.dump(self.records, f, ensure_ascii=False, indent=4)
         except Exception as e:
-            logger.error(f"保存违规记录失败: {e}")
+            logger.error(f"保存违规记录失败: {e}", exc_info=True)
 
-    # ===== 权限检查辅助函数 =====
     def check_admin(self, event: AstrMessageEvent) -> bool:
-        # 🚀 从官方配置面板中实时读取管理员名单
         admins = self.plugin_config.get("super_admins", [])
-        if event.get_sender_id() in admins:
+        # 修复7：强制将双方 ID 转为字符串，解决潜在的类型不一致逻辑边界问题
+        str_admins = [str(a) for a in admins]
+        sender_id = str(event.get_sender_id())
+        
+        if sender_id in str_admins:
             return True
         try:
             role = event.message_obj.sender.role
             if role in ['admin', 'owner']:
                 return True
-        except Exception:
+        except AttributeError: # 修复5：收敛异常类型，不再使用宽泛的 Exception
             pass
         return False
 
-    # ===== 核心监听功能 =====
-    @filter.regex(r"[\s\S]*踢出玩家[\s\S]*")
+    # 修复2：收窄正则监听范围，只有同时具备关键字才会进入处理，降低无意义开销
+    @filter.regex(r"踢出玩家\s+\S+\s+成功")
     async def on_kick_success(self, event: AstrMessageEvent):
-        # 🚀 从官方配置面板中实时读取管服机器人名单
         allowed_bots = self.plugin_config.get("allowed_bot_ids", [])
-        sender_id = event.get_sender_id()
+        str_allowed_bots = [str(b) for b in allowed_bots]
+        sender_id = str(event.get_sender_id())
         
-        if sender_id not in allowed_bots:
+        if sender_id not in str_allowed_bots:
             return
 
         text = event.message_str
         
-        if "踢出玩家" in text and "成功" in text and "原因" in text:
-            try:
-                part1 = text.split("踢出玩家")[1]
-                player_id = part1.split("成功")[0].strip() 
-                
-                after_reason = text.split("原因")[1]
-                reason = after_reason.strip("：: \n\r\t")
-                
-                if not player_id:
-                    return
+        # 修复3：使用结构化具名正则匹配替代脆弱的 split 切割，保证数据提取准确性
+        match = re.search(r"踢出玩家\s+(?P<player_id>\S+)\s+成功.*?原因[:：]\s*(?P<reason>.+)", text, re.DOTALL)
+        
+        if not match:
+            return
+            
+        player_id = match.group("player_id").strip()
+        reason = match.group("reason").strip()
+        
+        if not player_id:
+            return
 
-                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
-                if player_id not in self.records:
-                    self.records[player_id] = []
-                
-                self.records[player_id].append({
-                    "time": current_time,
-                    "reason": reason
-                })
-                
-                current_kicks = len(self.records[player_id])
-                self.save_data()
-                
-                logger.info(f"✅ 成功记录违规: 玩家 {player_id} 因 '{reason}' 被踢出。累计: {current_kicks}")
-                
-                reply_message = (
-                    f"⚠️ 【违规处理记录】\n"
-                    f"👤 玩家：{player_id}\n"
-                    f"🕒 时间：{current_time}\n"
-                    f"📝 原因：{reason}\n"
-                    f"📊 该玩家累计被踢出次数：{current_kicks} 次"
-                )
-                
-                yield event.plain_result(reply_message)
-                
-            except Exception as e:
-                logger.error(f"❌ 提取违规信息时出错: {e}")
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        if player_id not in self.records:
+            self.records[player_id] = []
+        
+        self.records[player_id].append({
+            "time": current_time,
+            "reason": reason
+        })
+        
+        current_kicks = len(self.records[player_id])
+        self.save_data()
+        
+        logger.info(f"✅ 成功记录违规: 玩家 {player_id} 因 '{reason}' 被踢出。累计: {current_kicks}")
+        
+        reply_message = (
+            f"⚠️ 【违规处理记录】\n"
+            f"👤 玩家：{player_id}\n"
+            f"🕒 时间：{current_time}\n"
+            f"📝 原因：{reason}\n"
+            f"📊 该玩家累计被踢出次数：{current_kicks} 次"
+        )
+        
+        yield event.plain_result(reply_message)
         
     @filter.command("tk帮助")
     async def tk_help(self, event: AstrMessageEvent):
@@ -123,9 +133,14 @@ class TKTrackerPlugin(Star):
         )
         yield event.plain_result(help_text)
 
+    # 修复4：给 player_id 增加默认空字符串，并处理用户未传参的兜底场景
     @filter.command("tk查")
-    async def query_tk(self, event: AstrMessageEvent, player_id: str):
+    async def query_tk(self, event: AstrMessageEvent, player_id: str = ""):
         '''查询玩家被踢出的次数及历史记录 (用法: /tk查 [玩家id])'''
+        if not player_id:
+            yield event.plain_result("⚠️ 缺少参数！正确用法: /tk查 [玩家ID]")
+            return
+            
         player_records = self.records.get(player_id, [])
         kicks = len(player_records)
         
@@ -135,14 +150,19 @@ class TKTrackerPlugin(Star):
             reply = f"📊 玩家 {player_id} 累计被踢出过 {kicks} 次。\n\n📜 违规历史："
             recent_records = player_records[-5:] 
             for i, record in enumerate(recent_records, 1):
-                reply += f"\n{i}. [{record['time']}] {record['reason']}"
+                # 双重保险，防止旧数据结构损坏
+                reply += f"\n{i}. [{record.get('time', '未知时间')}] {record.get('reason', '未知原因')}"
             if kicks > 5:
                 reply += f"\n... (省略更早的 {kicks - 5} 条记录)"
             yield event.plain_result(reply)
 
     @filter.command("tk清空")
-    async def clear_tk(self, event: AstrMessageEvent, player_id: str):
+    async def clear_tk(self, event: AstrMessageEvent, player_id: str = ""):
         '''清空指定玩家的踢出记录 (用法: /tk清空 [玩家id])'''
+        if not player_id:
+            yield event.plain_result("⚠️ 缺少参数！正确用法: /tk清空 [玩家ID]")
+            return
+            
         if not self.check_admin(event):
             yield event.plain_result("❌ 权限不足：只有管理员才能执行清空操作！")
             return
