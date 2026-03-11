@@ -1,0 +1,5 @@
+name: astrbot_plugin_tk_tracker
+desc: 玩家违规踢出次数记录插件
+help: 群内发送 *tk [玩家id] [原因] 即可记录并播报
+version: 1.0.0
+author: Nyaportemi
