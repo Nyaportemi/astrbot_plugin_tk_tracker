@@ -48,5 +48,6 @@
 插件的运行数据默认保存在 AstrBot 根目录下的：
 `data/tk_tracker/records.json`
 
+一作：Deepseek，Gemini
 ---
 *Powered by AstrBot Plugin System.*
