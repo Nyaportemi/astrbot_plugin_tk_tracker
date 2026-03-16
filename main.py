@@ -124,7 +124,9 @@ class TKTrackerPlugin(Star):
             "------------------------\n"
             "📚 【查询指令】 (所有人可用)\n"
             "🔹 /tk查 [玩家ID]\n"
-            "  └ 查询某个玩家的被踢次数和近期违规原因。\n\n"
+            "  └ 查询某个玩家的被踢次数和近期违规原因。\n"
+            "🔹 /tk排行\n"
+            "  └ 查看群内违规被踢次数前十名的“封神榜”。\n\n"
             "👑 【管理指令】 (仅管理员可用)\n"
             "🔸 /tk清空 [玩家ID]\n"
             "  └ 清除某个特定玩家的违规记录。\n"
@@ -132,6 +134,39 @@ class TKTrackerPlugin(Star):
             "  └ 危险操作！清空数据库内所有人的违规记录。"
         )
         yield event.plain_result(help_text)
+
+    # 🌟 新增的排行榜功能在这里！
+    @filter.command("tk排行")
+    async def tk_leaderboard(self, event: AstrMessageEvent):
+        '''查看违规被踢次数排行榜 (前十名) (用法: /tk排行)'''
+        if not self.records:
+            yield event.plain_result("📊 目前数据库中没有任何违规记录哦！")
+            return
+
+        # 1. 统计每个玩家的违规次数
+        leaderboard_data = []
+        for player_id, records in self.records.items():
+            kicks_count = len(records)
+            if kicks_count > 0:
+                leaderboard_data.append((player_id, kicks_count))
+
+        # 2. 按违规次数从大到小排序 (倒序)
+        leaderboard_data.sort(key=lambda x: x[1], reverse=True)
+
+        # 3. 截取前十名
+        top_10 = leaderboard_data[:10]
+
+        # 4. 拼接回复文案
+        reply = "🏆 【TK 违规“封神榜” Top 10】\n"
+        reply += "------------------------\n"
+        
+        medals = ["🥇", "🥈", "🥉"]
+        
+        for i, (player_id, count) in enumerate(top_10):
+            medal = medals[i] if i < 3 else f" {i+1}. "
+            reply += f"{medal} 玩家: {player_id} | 被踢: {count} 次\n"
+            
+        yield event.plain_result(reply.strip())
 
     # 修复4：给 player_id 增加默认空字符串，并处理用户未传参的兜底场景
     @filter.command("tk查")
