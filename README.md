@@ -49,6 +49,7 @@
 `data/tk_tracker/records.json`
 
 一作：Deepseek，Gemini
+
 1.0.1更新
 添加了排行榜功能
 ---
