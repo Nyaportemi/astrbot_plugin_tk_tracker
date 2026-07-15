@@ -2,13 +2,13 @@
     "super_admins": {
         "description": "超级管理员 QQ 号",
         "type": "list",
-        "hint": "拥有清空违规数据的最高权限",
-        "default": ["123456789"]
+        "hint": "可执行清空指定玩家或全部违规记录的账号",
+        "default": []
     },
     "allowed_bot_ids": {
         "description": "管服机器人 QQ 号",
         "type": "list",
-        "hint": "只有名单内的 QQ 发送的踢人消息才会被记录",
-        "default": ["987654321", "111111111"]
+        "hint": "只有名单内账号发送的踢人播报才会被记录",
+        "default": []
     }
 }
