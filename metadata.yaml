@@ -1,10 +1,12 @@
 name: astrbot_plugin_tk_tracker
 display_name: TK Tracker - 违规记录
-desc: 轻量记录管服机器人的踢人播报，支持历史查询、排行与数据管理。
+desc: 轻量记录管服机器人的踢人播报，支持会话隔离、服务器筛选、去重、统计与安全管理。
+short_desc: 轻量、隔离且可统计的玩家违规记录工具。
 author: Nyaportemi
-version: 1.1.0
+version: 1.2.0
 repo: https://github.com/Nyaportemi/astrbot_plugin_tk_tracker
 tags:
   - 群管
   - 工具
+  - BF1
 social_link: ""
