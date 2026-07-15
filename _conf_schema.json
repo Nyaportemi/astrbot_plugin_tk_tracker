@@ -2,7 +2,7 @@
     "super_admins": {
         "description": "超级管理员 QQ 号",
         "type": "list",
-        "hint": "可执行清空指定玩家或全部违规记录的账号",
+        "hint": "可删除单条记录、清空玩家记录或确认清空当前会话",
         "default": []
     },
     "allowed_bot_ids": {
@@ -10,5 +10,41 @@
         "type": "list",
         "hint": "只有名单内账号发送的踢人播报才会被记录",
         "default": []
+    },
+    "bot_server_map": {
+        "description": "机器人与服务器名称映射",
+        "type": "list",
+        "hint": "每行格式：机器人QQ=服务器名称，例如 123456789=一服",
+        "default": []
+    },
+    "auto_reply": {
+        "description": "记录后发送群聊回复",
+        "type": "bool",
+        "hint": "关闭后进入静默模式，只保存记录，不发送自动回复",
+        "default": true
+    },
+    "query_limit": {
+        "description": "查询显示记录数",
+        "type": "int",
+        "hint": "允许范围 1 至 20，超出范围会自动修正",
+        "default": 5
+    },
+    "leaderboard_limit": {
+        "description": "排行榜显示人数",
+        "type": "int",
+        "hint": "允许范围 1 至 30，超出范围会自动修正",
+        "default": 10
+    },
+    "default_stats_days": {
+        "description": "默认统计天数",
+        "type": "int",
+        "hint": "发送 /tk统计 且不指定天数时使用，允许范围 1 至 365",
+        "default": 7
+    },
+    "duplicate_window_seconds": {
+        "description": "重复播报判断时间",
+        "type": "int",
+        "hint": "没有消息 ID 时，相同播报在该秒数内只记录一次；允许范围 0 至 600",
+        "default": 30
     }
 }
