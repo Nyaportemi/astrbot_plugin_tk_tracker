@@ -1,3 +1,5 @@
+import csv
+import hashlib
 import json
 import sqlite3
 import threading
@@ -9,7 +11,7 @@ from typing import Iterable, Optional
 class RecordStorage:
     """SQLite 存储层：会话隔离、消息去重和常数时间排行榜统计。"""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
     LEGACY_SCOPE = "__legacy_global__"
     MIGRATION_KEY = "legacy_json_migration_v1"
 
@@ -45,7 +47,8 @@ class RecordStorage:
                     occurred_ts INTEGER NOT NULL DEFAULT 0,
                     reason TEXT NOT NULL,
                     source_bot_id TEXT NOT NULL DEFAULT '',
-                    message_key TEXT
+                    message_key TEXT,
+                    dedupe_key TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE TABLE IF NOT EXISTS metadata (
@@ -68,7 +71,8 @@ class RecordStorage:
                     operator_id TEXT NOT NULL,
                     action TEXT NOT NULL,
                     detail TEXT NOT NULL,
-                    occurred_at TEXT NOT NULL
+                    occurred_at TEXT NOT NULL,
+                    occurred_ts INTEGER NOT NULL DEFAULT 0
                 );
                 """
             )
@@ -81,6 +85,10 @@ class RecordStorage:
             self._ensure_column("records", "occurred_ts", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("records", "source_bot_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("records", "message_key", "TEXT")
+            self._ensure_column("records", "dedupe_key", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(
+                "audit_log", "occurred_ts", "INTEGER NOT NULL DEFAULT 0"
+            )
 
             self._conn.execute("DROP INDEX IF EXISTS idx_records_player_id_id")
             self._conn.executescript(
@@ -95,8 +103,12 @@ class RecordStorage:
                 ON records(scope_id, message_key)
                 WHERE message_key IS NOT NULL AND message_key <> '';
 
+                CREATE INDEX IF NOT EXISTS idx_records_dedupe_time
+                ON records(scope_id, dedupe_key, occurred_ts DESC)
+                WHERE dedupe_key <> '';
+
                 CREATE INDEX IF NOT EXISTS idx_audit_scope_time
-                ON audit_log(scope_id, id DESC);
+                ON audit_log(scope_id, occurred_ts DESC, id DESC);
                 """
             )
 
@@ -118,6 +130,16 @@ class RecordStorage:
                     WHERE occurred_ts = 0
                     """
                 )
+                self._conn.execute(
+                    """
+                    UPDATE audit_log
+                    SET occurred_ts = COALESCE(
+                        CAST(strftime('%s', occurred_at) AS INTEGER), 0
+                    )
+                    WHERE occurred_ts = 0
+                    """
+                )
+                self._backfill_dedupe_keys_locked()
                 self._rebuild_stats_locked()
                 self._set_metadata_locked("schema_version", str(self.SCHEMA_VERSION))
 
@@ -153,6 +175,39 @@ class RecordStorage:
             """
         )
 
+    def _backfill_dedupe_keys_locked(self) -> None:
+        last_id = 0
+        while True:
+            rows = self._conn.execute(
+                """
+                SELECT id, server_name, player_id, reason, source_bot_id
+                FROM records
+                WHERE dedupe_key = '' AND id > ?
+                ORDER BY id
+                LIMIT 500
+                """,
+                (last_id,),
+            ).fetchall()
+            if not rows:
+                break
+            updates = []
+            for row in rows:
+                raw_key = (
+                    f"{row['server_name']}\0{str(row['player_id']).casefold()}"
+                    f"\0{row['reason']}\0{row['source_bot_id']}"
+                ).encode("utf-8")
+                updates.append(
+                    (
+                        hashlib.blake2b(raw_key, digest_size=16).hexdigest(),
+                        int(row["id"]),
+                    )
+                )
+            self._conn.executemany(
+                "UPDATE records SET dedupe_key = ? WHERE id = ?",
+                updates,
+            )
+            last_id = int(rows[-1]["id"])
+
     def bind_legacy_scope(self, scope_id: str) -> int:
         """把无法识别会话的旧数据一次性绑定到首次使用的会话。"""
         if not scope_id or scope_id == self.LEGACY_SCOPE:
@@ -185,6 +240,10 @@ class RecordStorage:
         duplicate_window_seconds: int,
     ) -> tuple[bool, int, int]:
         """返回 (是否新增, 记录编号, 玩家在当前服务器的累计次数)。"""
+        raw_dedupe_key = (
+            f"{server_name}\0{player_id.casefold()}\0{reason}\0{source_bot_id}"
+        ).encode("utf-8")
+        dedupe_key = hashlib.blake2b(raw_dedupe_key, digest_size=16).hexdigest()
         with self._lock, self._conn:
             if message_key:
                 duplicate = self._conn.execute(
@@ -198,16 +257,12 @@ class RecordStorage:
                 duplicate = self._conn.execute(
                     """
                     SELECT id FROM records
-                    WHERE scope_id = ? AND server_name = ? AND player_id = ?
-                      AND reason = ? AND source_bot_id = ? AND occurred_ts >= ?
-                    ORDER BY id DESC LIMIT 1
+                    WHERE scope_id = ? AND dedupe_key = ? AND occurred_ts >= ?
+                    ORDER BY occurred_ts DESC, id DESC LIMIT 1
                     """,
                     (
                         scope_id,
-                        server_name,
-                        player_id,
-                        reason,
-                        source_bot_id,
+                        dedupe_key,
                         occurred_ts - max(duplicate_window_seconds, 0),
                     ),
                 ).fetchone()
@@ -223,8 +278,8 @@ class RecordStorage:
                     """
                     INSERT INTO records(
                         scope_id, server_name, player_id, occurred_at, occurred_ts,
-                        reason, source_bot_id, message_key
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        reason, source_bot_id, message_key, dedupe_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         scope_id,
@@ -235,6 +290,7 @@ class RecordStorage:
                         reason,
                         source_bot_id,
                         message_key,
+                        dedupe_key,
                     ),
                 )
             except sqlite3.IntegrityError:
@@ -376,6 +432,244 @@ class RecordStorage:
             "reasons": [(row["reason"], int(row["count"])) for row in reasons],
         }
 
+    def get_player_risk(
+        self,
+        scope_id: str,
+        player_id: str,
+        days: int,
+        now_ts: int,
+        server_name: Optional[str] = None,
+    ) -> dict:
+        since_ts = now_ts - max(1, int(days)) * 86400
+        where = "scope_id = ? AND player_id = ? AND occurred_ts >= ?"
+        params: list[object] = [scope_id, player_id, since_ts]
+        if server_name is not None:
+            where += " AND server_name = ?"
+            params.append(server_name)
+        with self._lock:
+            summary = self._conn.execute(
+                f"""
+                SELECT COUNT(*) AS records,
+                       MIN(occurred_at) AS first_at,
+                       MAX(occurred_at) AS last_at,
+                       COUNT(DISTINCT server_name) AS servers
+                FROM records WHERE {where}
+                """,
+                params,
+            ).fetchone()
+            reasons = self._conn.execute(
+                f"""
+                SELECT reason, COUNT(*) AS count
+                FROM records WHERE {where}
+                GROUP BY reason
+                ORDER BY count DESC, reason ASC
+                LIMIT 3
+                """,
+                params,
+            ).fetchall()
+        return {
+            "records": int(summary["records"]),
+            "first_at": summary["first_at"] or "",
+            "last_at": summary["last_at"] or "",
+            "servers": int(summary["servers"]),
+            "reasons": [(row["reason"], int(row["count"])) for row in reasons],
+        }
+
+    def get_audit_log(self, scope_id: str, limit: int = 10) -> list[dict]:
+        safe_limit = max(1, min(int(limit), 50))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, operator_id, action, detail, occurred_at
+                FROM audit_log
+                WHERE scope_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (scope_id, safe_limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def write_audit(
+        self,
+        scope_id: str,
+        operator_id: str,
+        action: str,
+        detail: str,
+        occurred_at: str,
+    ) -> None:
+        with self._lock, self._conn:
+            self._write_audit_locked(
+                scope_id,
+                operator_id,
+                action,
+                detail,
+                occurred_at,
+            )
+
+    def get_status(self) -> dict:
+        with self._lock:
+            records = int(
+                self._conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+            )
+            players = int(
+                self._conn.execute(
+                    "SELECT COUNT(DISTINCT player_id) FROM records"
+                ).fetchone()[0]
+            )
+            scopes = int(
+                self._conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT scope_id) FROM records
+                    WHERE scope_id <> ?
+                    """,
+                    (self.LEGACY_SCOPE,),
+                ).fetchone()[0]
+            )
+            audits = int(
+                self._conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+            )
+            quick_check = str(
+                self._conn.execute("PRAGMA quick_check").fetchone()[0]
+            )
+            schema_version = self._get_metadata_locked("schema_version") or "0"
+        try:
+            size_bytes = self.db_path.stat().st_size
+        except OSError:
+            size_bytes = 0
+        return {
+            "records": records,
+            "players": players,
+            "scopes": scopes,
+            "audits": audits,
+            "size_bytes": size_bytes,
+            "quick_check": quick_check,
+            "schema_version": schema_version,
+        }
+
+    def cleanup_old_records(
+        self,
+        retention_days: int,
+        audit_retention_days: int,
+        now_ts: int,
+    ) -> dict:
+        deleted_records = 0
+        deleted_audits = 0
+        with self._lock, self._conn:
+            if retention_days > 0:
+                cutoff = now_ts - int(retention_days) * 86400
+                cursor = self._conn.execute(
+                    """
+                    DELETE FROM records
+                    WHERE occurred_ts > 0 AND occurred_ts < ?
+                    """,
+                    (cutoff,),
+                )
+                deleted_records = int(cursor.rowcount)
+                if deleted_records:
+                    self._rebuild_stats_locked()
+            if audit_retention_days > 0:
+                audit_cutoff = now_ts - int(audit_retention_days) * 86400
+                cursor = self._conn.execute(
+                    """
+                    DELETE FROM audit_log
+                    WHERE occurred_ts > 0 AND occurred_ts < ?
+                    """,
+                    (audit_cutoff,),
+                )
+                deleted_audits = int(cursor.rowcount)
+            self._conn.execute("PRAGMA optimize")
+        return {
+            "records": deleted_records,
+            "audits": deleted_audits,
+        }
+
+    @staticmethod
+    def _prune_files(
+        directory: Path,
+        pattern: str,
+        keep_count: int,
+    ) -> None:
+        files = sorted(
+            directory.glob(pattern),
+            key=lambda path: path.name,
+            reverse=True,
+        )
+        for path in files[max(1, int(keep_count)):]:
+            try:
+                path.unlink()
+            except OSError:
+                continue
+
+    def create_backup(self, backup_dir: Path, keep_count: int = 10) -> Path:
+        backup_dir = Path(backup_dir)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        destination = backup_dir / f"records-{timestamp}.db"
+        with self._lock:
+            backup_connection = sqlite3.connect(destination)
+            try:
+                self._conn.backup(backup_connection)
+                backup_connection.commit()
+            finally:
+                backup_connection.close()
+        self._prune_files(backup_dir, "records-*.db", keep_count)
+        return destination
+
+    def export_csv(
+        self,
+        scope_id: str,
+        destination: Path,
+        limit: int,
+        since_ts: int = 0,
+        server_name: Optional[str] = None,
+        keep_count: int = 20,
+    ) -> tuple[int, bool]:
+        safe_limit = max(1, min(int(limit), 50000))
+        where = "scope_id = ?"
+        params: list[object] = [scope_id]
+        if since_ts > 0:
+            where += " AND occurred_ts >= ?"
+            params.append(since_ts)
+        if server_name is not None:
+            where += " AND server_name = ?"
+            params.append(server_name)
+        params.append(safe_limit + 1)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT id, player_id, server_name, occurred_at, reason, source_bot_id
+                FROM records
+                WHERE {where}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        truncated = len(rows) > safe_limit
+        export_rows = rows[:safe_limit]
+        with destination.open("w", encoding="utf-8-sig", newline="") as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(
+                ["记录编号", "玩家ID", "服务器", "时间", "原因", "来源机器人"]
+            )
+            for row in reversed(export_rows):
+                writer.writerow(
+                    [
+                        row["id"],
+                        row["player_id"],
+                        row["server_name"],
+                        row["occurred_at"],
+                        row["reason"],
+                        row["source_bot_id"],
+                    ]
+                )
+        self._prune_files(destination.parent, "tk-records-*.csv", keep_count)
+        return len(export_rows), truncated
+
     def delete_record(
         self, scope_id: str, record_id: int, operator_id: str, occurred_at: str
     ) -> Optional[dict]:
@@ -498,12 +792,20 @@ class RecordStorage:
         detail: str,
         occurred_at: str,
     ) -> None:
+        try:
+            occurred_ts = int(
+                datetime.strptime(occurred_at, "%Y-%m-%d %H:%M:%S").timestamp()
+            )
+        except ValueError:
+            occurred_ts = 0
         self._conn.execute(
             """
-            INSERT INTO audit_log(scope_id, operator_id, action, detail, occurred_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO audit_log(
+                scope_id, operator_id, action, detail, occurred_at, occurred_ts
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (scope_id, operator_id, action, detail, occurred_at),
+            (scope_id, operator_id, action, detail, occurred_at, occurred_ts),
         )
 
     def migrate_legacy_json(self, candidates: Iterable[Path]) -> tuple[int, Optional[Path]]:

@@ -46,5 +46,71 @@
         "type": "int",
         "hint": "没有消息 ID 时，相同播报在该秒数内只记录一次；允许范围 0 至 600",
         "default": 30
+    },
+    "command_cooldown_seconds": {
+        "description": "普通查询冷却秒数",
+        "type": "int",
+        "hint": "限制同一用户频繁查询；管理员不受限制，设为 0 可关闭",
+        "default": 2
+    },
+    "risk_alert_enabled": {
+        "description": "启用自动风险提醒",
+        "type": "bool",
+        "hint": "达到近期违规阈值时在记录回复中提醒；默认关闭",
+        "default": false
+    },
+    "risk_threshold": {
+        "description": "风险提醒记录阈值",
+        "type": "int",
+        "hint": "风险统计周期内达到该记录数时提醒，允许范围 2 至 100",
+        "default": 3
+    },
+    "risk_window_days": {
+        "description": "风险统计周期天数",
+        "type": "int",
+        "hint": "风险查询和自动提醒默认使用的时间范围，允许范围 1 至 365",
+        "default": 7
+    },
+    "risk_alert_cooldown_seconds": {
+        "description": "同一玩家风险提醒冷却",
+        "type": "int",
+        "hint": "避免对同一会话、服务器和玩家连续提醒；设为 0 可关闭冷却",
+        "default": 3600
+    },
+    "retention_days": {
+        "description": "违规记录保留天数",
+        "type": "int",
+        "hint": "超过天数的记录会定期清理；默认 0 表示永久保留",
+        "default": 0
+    },
+    "audit_retention_days": {
+        "description": "审计记录保留天数",
+        "type": "int",
+        "hint": "管理操作记录的保留期限；设为 0 表示永久保留",
+        "default": 180
+    },
+    "export_limit": {
+        "description": "单次导出记录上限",
+        "type": "int",
+        "hint": "保护机器人资源，允许范围 100 至 50000",
+        "default": 5000
+    },
+    "backup_keep_count": {
+        "description": "数据库备份保留份数",
+        "type": "int",
+        "hint": "自动删除更早的插件备份，允许范围 1 至 100",
+        "default": 10
+    },
+    "export_keep_count": {
+        "description": "CSV 导出文件保留份数",
+        "type": "int",
+        "hint": "自动删除更早的插件导出文件，允许范围 1 至 200",
+        "default": 20
+    },
+    "backup_before_clear": {
+        "description": "清空全部前自动备份",
+        "type": "bool",
+        "hint": "确认清空当前会话前先备份完整数据库；默认开启",
+        "default": true
     }
 }
